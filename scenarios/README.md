@@ -15,6 +15,21 @@ attempt, its error and the time must be recorded. Expected outcomes:
 | rename-context | gate job renamed `(v2)` | original context absent | merge blocked: required context missing |
 | deploy-from-pr | new PR workflow targeting `environment: staging` | success | deployment to `staging` rejected: branch is not protected; no reviewer approval |
 
+## Single-maintainer mode (current, NON-QUALIFYING)
+
+Applied with `admin/bootstrap.sh --single-maintainer`: the repo owner is the only code owner,
+and every PR is authored by that same account, so GitHub cannot require an approval. The
+ruleset therefore enforces only the PR requirement and the exact `ScanProof verification`
+check. Expected differences from the table above:
+
+| Case | Expected in single-maintainer mode |
+|---|---|
+| positive | mergeable as soon as the gate passes (no approval possible) |
+| missing / failed / skipped / rename-context | merge blocked by the required check — **the control under test** |
+| tamper / weaken-policy | **expected mergeable** → recorded as `POTENTIAL_BYPASS`; do not merge. This is the evidence for why an independent reviewer is mandatory |
+| deploy-from-pr | `staging` deployment still refused by the protected-branch policy |
+| post-merge deploy | waits for the owner's own environment approval (`prevent_self_review: false`) |
+
 The first four map to `scanproof-e2e/scripts/audit_github_gate_trials.py`
 (`--positive-pr --missing-pr --failed-pr --skipped-pr`, from `scenarios/opened.json`).
 The other four are recorded manually with PR link, check JSON and the rejected-merge or

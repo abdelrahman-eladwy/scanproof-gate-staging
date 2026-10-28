@@ -58,6 +58,50 @@ class Ruleset(unittest.TestCase):
         self.assertIn("non_fast_forward", self.rules)
 
 
+
+class SingleMaintainerMode(unittest.TestCase):
+    """The non-qualifying mode keeps the required check but must never pass as qualifying."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.strict = json.loads(read(ROOT / "admin/ruleset.json"))
+        cls.single = json.loads(read(ROOT / "admin/ruleset.single-maintainer.json"))
+
+    def test_only_review_rules_differ(self):
+        def without_review(rs):
+            rules = [r for r in rs["rules"] if r["type"] != "pull_request"]
+            return {k: v for k, v in rs.items() if k not in ("rules", "name")}, rules
+        self.assertEqual(without_review(self.single), without_review(self.strict))
+        self.assertIn("NON-QUALIFYING", self.single["name"])
+
+    def test_still_requires_pr_and_exact_trusted_check(self):
+        rules = {r["type"]: r.get("parameters", {}) for r in self.single["rules"]}
+        self.assertIn("pull_request", rules)
+        self.assertEqual(rules["required_status_checks"]["required_status_checks"],
+                         [{"context": CHECK, "integration_id": ACTIONS_APP}])
+        self.assertIs(rules["required_status_checks"]["strict_required_status_checks_policy"],
+                      True)
+        self.assertEqual(self.single["bypass_actors"], [])
+
+    def test_would_fail_the_qualifying_preflight(self):
+        pr = {r["type"]: r.get("parameters", {}) for r in self.single["rules"]}["pull_request"]
+        self.assertLess(pr["required_approving_review_count"], 1)
+        self.assertIs(pr["require_code_owner_review"], False)
+
+    def test_environment_differs_only_in_self_review(self):
+        strict = json.loads(read(ROOT / "admin/environment.template.json"))
+        single = json.loads(read(ROOT / "admin/environment.single-maintainer.template.json"))
+        self.assertIs(single.pop("prevent_self_review"), False)
+        strict.pop("prevent_self_review")
+        self.assertEqual(single, strict)
+
+    def test_bootstrap_knows_both_modes(self):
+        text = read(ROOT / "admin/bootstrap.sh")
+        self.assertIn('if [ "$ARG" = "--single-maintainer" ]; then', text)
+        self.assertIn("admin/ruleset.single-maintainer.json", text)
+        self.assertIn('die "security owner must differ from repo owner"', text)
+        self.assertIn('die "rulesets already exist; refusing"', text)
+
 class Environment(unittest.TestCase):
     """Mirrors scanproof-e2e audit_github_environment.py criteria."""
 

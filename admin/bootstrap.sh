@@ -1,63 +1,78 @@
 #!/usr/bin/env bash
-# One-time administrator bootstrap for the SACRIFICIAL staging repository (scanproof#45).
+# One-time administrator setup for the SACRIFICIAL staging repository (scanproof#45).
 #
-# Usage (repository admin, from a clone of this repo on main, ruleset NOT yet applied):
+#   GH_TOKEN=<admin token, env only> admin/bootstrap.sh --single-maintainer
+#       Repo owner is the only code owner and environment reviewer. Required check
+#       enforced; approvals/code-owner review OFF. Evidence only, NON-QUALIFYING.
+#
 #   GH_TOKEN=<admin token, env only> admin/bootstrap.sh <security-owner-login>
+#       Qualifying mode: a distinct reviewer becomes code owner and environment reviewer;
+#       1 approval + code-owner review + last-push approval required.
 #
-# Order matters: CODEOWNERS is committed to main BEFORE the ruleset exists, then the
-# environment and ruleset are applied and read back. Nothing here touches the core or e2e
-# repositories, and no deployment credential is created.
+# Run from a clone of this repo on main, BEFORE any ruleset exists. Creates no credential
+# and touches no other repository.
 set -euo pipefail
 
-OWNER_LOGIN="${1:-}"
 REPO="${REPO:-abdelrahman-eladwy/scanproof-gate-staging}"
 API="repos/$REPO"
-
 die() { echo "bootstrap: $*" >&2; exit 1; }
-[[ "$OWNER_LOGIN" =~ ^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$ ]] || die "invalid GitHub login"
+lc() { tr '[:upper:]' '[:lower:]' <<<"$1"; }
+
+ARG="${1:-}"
+[ -n "$ARG" ] || die "usage: bootstrap.sh --single-maintainer | <security-owner-login>"
 [ -n "${GH_TOKEN:-}" ] || die "set GH_TOKEN (admin) in the environment, never as an argument"
+command -v gh >/dev/null || die "GitHub CLI 'gh' is required"
 [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || die "run from main"
 git diff --quiet && git diff --cached --quiet || die "working tree not clean"
+git pull -q --ff-only origin main
 
 repo_owner=$(gh api "$API" --jq .owner.login)
-admin_login=$(gh api user --jq .login)
-lc() { tr '[:upper:]' '[:lower:]' <<<"$1"; }
-[ "$(lc "$OWNER_LOGIN")" != "$(lc "$repo_owner")" ] || die "security owner must differ from repo owner"
-[ "$(lc "$OWNER_LOGIN")" != "$(lc "$admin_login")" ] || die "security owner must differ from the admin"
+[ "$(gh api "$API" --jq .permissions.admin)" = true ] || die "token lacks admin on $REPO"
+[ "$(gh api "$API/rulesets" --jq length)" = 0 ] || die "rulesets already exist; refusing"
+
+if [ "$ARG" = "--single-maintainer" ]; then
+  MODE=single-maintainer
+  OWNER_LOGIN="$repo_owner"
+  RULESET=admin/ruleset.single-maintainer.json
+  ENV_TEMPLATE=admin/environment.single-maintainer.template.json
+else
+  MODE=qualifying
+  OWNER_LOGIN="$ARG"
+  [[ "$OWNER_LOGIN" =~ ^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$ ]] || die "invalid GitHub login"
+  [ "$(lc "$OWNER_LOGIN")" != "$(lc "$repo_owner")" ] || die "security owner must differ from repo owner"
+  [ "$(lc "$OWNER_LOGIN")" != "$(lc "$(gh api user --jq .login)")" ] || die "security owner must differ from the admin"
+  RULESET=admin/ruleset.json
+  ENV_TEMPLATE=admin/environment.template.json
+fi
 owner_id=$(gh api "users/$OWNER_LOGIN" --jq .id)
 [[ "$owner_id" =~ ^[0-9]+$ ]] || die "could not resolve $OWNER_LOGIN"
+echo "mode: $MODE   code owner / environment reviewer: @$OWNER_LOGIN ($owner_id)"
 
-if gh api "$API/rulesets" --jq 'length' | grep -qv '^0$'; then
-  die "repository already has rulesets; refusing to bypass them for the CODEOWNERS commit"
+if [ "$MODE" = qualifying ]; then
+  echo "1/4 CODEOWNERS -> @$OWNER_LOGIN, invite as collaborator (they must accept)"
+  sed -i.bak "s/@$repo_owner\$/@$OWNER_LOGIN/" .github/CODEOWNERS && rm .github/CODEOWNERS.bak
+  git add .github/CODEOWNERS
+  git commit -q -m "chore: assign independent security CODEOWNER @$OWNER_LOGIN"
+  git push -q origin main
+  gh api -X PUT "$API/collaborators/$OWNER_LOGIN" -f permission=push >/dev/null
+else
+  echo "1/4 CODEOWNERS already names @$OWNER_LOGIN (single-maintainer)"
 fi
+grep -q "@$OWNER_LOGIN" .github/CODEOWNERS || die "CODEOWNERS does not name @$OWNER_LOGIN"
 
-echo "1/5 CODEOWNERS -> @$OWNER_LOGIN"
-sed -i.bak "s/@SECURITY_OWNER/@$OWNER_LOGIN/g" .github/CODEOWNERS && rm .github/CODEOWNERS.bak
-! grep -q SECURITY_OWNER .github/CODEOWNERS || die "placeholder remains"
-git add .github/CODEOWNERS
-git commit -q -m "chore: assign independent security CODEOWNER @$OWNER_LOGIN"
-git push -q origin main
-
-echo "2/5 invite @$OWNER_LOGIN as collaborator (push) — they must accept"
-gh api -X PUT "$API/collaborators/$OWNER_LOGIN" -f permission=push >/dev/null
-
-echo "3/5 protected staging environment"
-sed "s/\"__SECURITY_OWNER_ID__\"/$owner_id/" admin/environment.template.json \
+echo "2/4 protected staging environment"
+sed "s/\"__SECURITY_OWNER_ID__\"/$owner_id/" "$ENV_TEMPLATE" \
   | gh api -X PUT "$API/environments/staging" --input - >/dev/null
 
-echo "4/5 branch ruleset"
-ruleset_id=$(gh api -X POST "$API/rulesets" --input admin/ruleset.json --jq .id)
+echo "3/4 branch ruleset ($RULESET)"
+ruleset_id=$(gh api -X POST "$API/rulesets" --input "$RULESET" --jq .id)
 
-echo "5/5 read back"
-gh api "$API/rulesets/$ruleset_id" \
-  --jq '{id, enforcement, bypass_actors, rules: [.rules[].type]}'
-gh api "$API/environments/staging" \
-  --jq '{can_admins_bypass, deployment_branch_policy, protection_rules}'
-gh api "$API/codeowners/errors" --jq '.errors | length' | grep -qx 0 || die "CODEOWNERS errors"
-
-cat <<EOF
-Done. Ruleset $ruleset_id active. Next:
-  * @$OWNER_LOGIN accepts the collaborator invite.
-  * Run scanproof-e2e 'github-protection-preflight' (repository=$REPO, environment=staging).
-  * Open scenarios with scenarios/open-scenarios.sh using a CONTRIBUTOR token (not admin).
-EOF
+echo "4/4 read back"
+gh api "$API/rulesets/$ruleset_id" --jq \
+  '{id, name, enforcement, bypass_actors, rules: [.rules[] | {type, parameters}]}'
+gh api "$API/environments/staging" --jq \
+  '{name, can_admins_bypass, deployment_branch_policy,
+    protection_rules: [.protection_rules[] | {type, prevent_self_review,
+      reviewers: [.reviewers[]? | {type, login: .reviewer.login, id: .reviewer.id}]}]}'
+[ "$(gh api "$API/codeowners/errors" --jq '.errors | length')" = 0 ] || die "CODEOWNERS errors"
+echo "DONE mode=$MODE ruleset=$ruleset_id — paste this output to Claude, then delete the token."

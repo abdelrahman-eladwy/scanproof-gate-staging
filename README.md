@@ -12,6 +12,11 @@ live acceptance of a protected, independently owned ScanProof release gate on Gi
 - `scenarios/` holds eight adversarial PR cases and their expected outcomes.
 - `config-selftest` is an offline, non-required check of these files.
 
+**Current mode: single-maintainer (NON-QUALIFYING).** The owner is the only code owner and
+environment reviewer, so there is no independent review. Trials in this mode test the
+required check and environment rules, and are expected to show the tamper / weaken-policy
+gap. Qualifying trials need `admin/bootstrap.sh <distinct-reviewer-login>`.
+
 This repository proves nothing on its own. Evidence counts only once the ruleset and
 environment are applied, both e2e preflights pass against it, and contributor merge and
 deploy attempts are actually rejected.
