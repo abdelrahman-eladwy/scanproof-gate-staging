@@ -1,0 +1,107 @@
+# Mandatory ScanProof release gate for the SACRIFICIAL staging repository (scanproof#45).
+#
+# The ruleset requires the check context "ScanProof verification" from GitHub Actions
+# (integration 15368). On pull_request GitHub runs THIS file from the PR head, so a
+# contributor can rewrite it; that is why CODEOWNERS + required code-owner review by an
+# independent security owner is part of the control, and why scenarios/ includes a
+# tamper case. No secrets, no deployment credentials, no production systems.
+name: scanproof-gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanproof-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Exact ScanProof core commit under test. Change only via a security-owner-reviewed PR.
+  SCANPROOF_COMMIT: 02b17326568fd354e946e2f099fdf611831afa79
+
+jobs:
+  semgrep-sast:
+    name: semgrep-sast
+    runs-on: ubuntu-latest
+    container: semgrep/semgrep:1.181.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan application sources
+        run: |
+          mkdir -p reports
+          semgrep scan --config p/default --metrics=off --json --output reports/semgrep.json app/
+          semgrep scan --config p/default --metrics=off --sarif --output reports/semgrep.sarif app/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: semgrep-report
+          path: reports/
+          if-no-files-found: error
+
+  gate:
+    name: ScanProof verification
+    needs: [semgrep-sast]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read # annotations reveal steps hidden by continue-on-error
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: CODEOWNERS is configured and valid (fail closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test -s .github/CODEOWNERS || { echo "::error::.github/CODEOWNERS missing"; exit 1; }
+          if grep -q 'SECURITY_OWNER' .github/CODEOWNERS; then
+            echo "::error::CODEOWNERS still has the bootstrap placeholder"; exit 1
+          fi
+          errors=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/codeowners/errors?ref=$REF" \
+            | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["errors"]))')
+          [ "$errors" = "0" ] || { echo "::error::CODEOWNERS has $errors error(s)"; exit 1; }
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned ScanProof core
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/scanproof-src"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/abdelrahman-eladwy/scanproof "$SCANPROOF_COMMIT"
+          git -C "$src" checkout -q FETCH_HEAD
+          test "$(git -C "$src" rev-parse HEAD)" = "$SCANPROOF_COMMIT"
+          python -m pip install -q "$src"
+          echo "::notice title=ScanProof under test::$(scanproof --version) @ $SCANPROOF_COMMIT"
+      - name: ScanProof verifies this run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p evidence
+          set +e
+          scanproof verify --provider github -P policies/scanproof-gate.yaml \
+            --pipeline "$RUN_ID" -p "$REPO" -o evidence/scanproof-gate.json
+          rc=$?
+          echo "::notice title=ScanProof gate::exit $rc (0 = VERIFIED required)"
+          exit $rc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: scanproof-gate-evidence
+          path: evidence/
+          if-no-files-found: warn

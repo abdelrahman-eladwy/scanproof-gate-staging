@@ -1,0 +1,23 @@
+# Mandatory release gate for the sacrificial staging repository (scanproof#45).
+# Owned by the security CODEOWNER; contributors must not be able to weaken it.
+apiVersion: scanproof.dev/v1alpha1
+kind: PipelineAssurancePolicy
+metadata: {name: gate-staging}
+project: {provider: github, id: abdelrahman-eladwy/scanproof-gate-staging}
+requirements:
+  - id: SAST-NATIVE
+    tool: semgrep
+    job_name: semgrep-sast
+    artifact_name: semgrep-report
+    report_path: semgrep.json
+    checks:
+      scanner_errors_allowed: 0
+      minimum_scanned_files: 1
+      required_paths: ["app/"]
+  - id: SAST-SARIF
+    tool: sarif
+    job_name: semgrep-sast
+    artifact_name: semgrep-report
+    report_path: semgrep.sarif
+    checks:
+      expected_scanner: Semgrep OSS

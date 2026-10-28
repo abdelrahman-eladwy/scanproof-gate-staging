@@ -1,0 +1,8 @@
+# Independent security owner for the sacrificial gate repository (scanproof#45).
+# admin/bootstrap.sh replaces @SECURITY_OWNER with the real, distinct reviewer account.
+# The gate FAILS while this placeholder remains, so an unconfigured repo cannot pass.
+*                       @SECURITY_OWNER
+/.github/               @SECURITY_OWNER
+/policies/              @SECURITY_OWNER
+/admin/                 @SECURITY_OWNER
+/.github/CODEOWNERS     @SECURITY_OWNER

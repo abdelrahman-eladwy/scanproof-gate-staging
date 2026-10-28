@@ -1,0 +1,112 @@
+# Staging-only "deployment" for the sacrificial gate repository (scanproof#45).
+#
+# There is NO real target and NO credential: the deploy step only writes a signed-off
+# deployment record artifact. workflow_run always executes this file from the default
+# branch, so a pull request cannot modify it. It re-verifies the triggering gate run with
+# ScanProof before entering the protected `staging` environment, whose required reviewer
+# must be the independent security owner.
+name: deploy-staging
+
+on:
+  workflow_run:
+    workflows: [scanproof-gate]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+env:
+  SCANPROOF_COMMIT: 02b17326568fd354e946e2f099fdf611831afa79
+
+jobs:
+  reverify:
+    name: Re-verify gate before staging deploy
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    outputs:
+      head_sha: ${{ steps.bind.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: bind
+        name: Bind to the gated commit
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad head sha"; exit 1; }
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned ScanProof core
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/scanproof-src"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/abdelrahman-eladwy/scanproof "$SCANPROOF_COMMIT"
+          git -C "$src" checkout -q FETCH_HEAD
+          test "$(git -C "$src" rev-parse HEAD)" = "$SCANPROOF_COMMIT"
+          python -m pip install -q "$src"
+      - name: ScanProof re-verifies the triggering gate run (default-branch policy)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p evidence
+          scanproof verify --provider github -P policies/scanproof-gate.yaml \
+            --pipeline "$RUN_ID" -p "$REPO" -o evidence/reverify.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: reverify-evidence
+          path: evidence/
+
+  deploy:
+    name: Deploy to staging (no-op record)
+    needs: [reverify]
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+    steps:
+      - name: Write staging deployment record (no real target, no credentials)
+        env:
+          HEAD_SHA: ${{ needs.reverify.outputs.head_sha }}
+          GATE_RUN: ${{ github.event.workflow_run.html_url }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          mkdir -p record
+          python3 - <<'PY' > record/staging-deployment.json
+          import json, os, datetime
+          print(json.dumps({
+              "environment": "staging",
+              "real_target": None,
+              "credentials_used": False,
+              "head_sha": os.environ["HEAD_SHA"],
+              "gate_run": os.environ["GATE_RUN"],
+              "triggered_by": os.environ["ACTOR"],
+              "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          }, indent=2))
+          PY
+          cat record/staging-deployment.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staging-deployment-record
+          path: record/
